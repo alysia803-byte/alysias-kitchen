@@ -347,7 +347,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);m
 
 <div class="toast" id="toast"></div>
 
-<script>
+<script type="module">
 /* ══════════════════════════════════════
    DATA DEFINITIONS
 ══════════════════════════════════════ */
@@ -390,40 +390,107 @@ const BUILTIN_SOUP = [
 ];
 
 /* ══════════════════════════════════════
-   STORAGE KEYS
+   FIREBASE CONFIG — replace with yours!
 ══════════════════════════════════════ */
-const KEY_CUSTOM_DISHES = 'familyDinner_customDishes';
-const KEY_ORDERS_PREFIX  = 'familyDinner_orders_';
-
-function todayKey() {
-  const d = new Date();
-  return KEY_ORDERS_PREFIX + `${d.getFullYear()}_${d.getMonth()+1}_${d.getDate()}`;
-}
-function loadOrders() {
-  try {
-    // purge old order keys
-    Object.keys(localStorage).forEach(k => {
-      if (k.startsWith(KEY_ORDERS_PREFIX) && k !== todayKey()) localStorage.removeItem(k);
-    });
-    const raw = localStorage.getItem(todayKey());
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-function saveOrders(arr) { localStorage.setItem(todayKey(), JSON.stringify(arr)); }
-
-function loadCustomDishes() {
-  try { const r = localStorage.getItem(KEY_CUSTOM_DISHES); return r ? JSON.parse(r) : []; }
-  catch { return []; }
-}
-function saveCustomDishes(arr) { localStorage.setItem(KEY_CUSTOM_DISHES, JSON.stringify(arr)); }
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyDmEO69ygkujOJUnCxTGk48CraBAt34RN0",
+  authDomain:        "alysias-kitchen.firebaseapp.com",
+  projectId:         "alysias-kitchen",
+  storageBucket:     "alysias-kitchen.firebasestorage.app",
+  messagingSenderId: "690549893272",
+  appId:             "1:690549893272:web:65f4b90791d94e3fbbc8ed",
+  measurementId:     "G-ZBWNQNGX9Z"
+};
 
 /* ══════════════════════════════════════
    STATE
 ══════════════════════════════════════ */
-let orders       = loadOrders();
-let customDishes = loadCustomDishes();
+let orders       = [];
+let customDishes = [];
 let currentName  = '';
 let pendingDeleteId = null;
+let db = null;
+
+/* ══════════════════════════════════════
+   HELPERS
+══════════════════════════════════════ */
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+
+/* ══════════════════════════════════════
+   FIREBASE INIT & LISTENERS
+══════════════════════════════════════ */
+async function initFirebase() {
+  // Show connecting state
+  document.getElementById('boardMeta').textContent = '連線中…';
+
+  const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
+  const { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, where, getDocs, writeBatch }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+
+  const app = initializeApp(FIREBASE_CONFIG);
+  db = getFirestore(app);
+
+  // ── Listen to today's orders in real-time ──
+  const today = todayStr();
+  const ordersRef = collection(db, 'orders');
+  const todayQuery = query(ordersRef, where('date', '==', today));
+
+  onSnapshot(todayQuery, snap => {
+    orders = snap.docs.map(d => d.data());
+    orders.sort((a,b) => a.ts - b.ts);
+    renderBoard();
+    updateDate();
+  });
+
+  // ── Listen to custom dishes in real-time ──
+  const customRef = collection(db, 'customDishes');
+  onSnapshot(customRef, snap => {
+    customDishes = snap.docs.map(d => d.data());
+    renderMenu();
+  });
+
+  // ── Midnight auto-purge old orders ──
+  scheduleMidnightReset(db, ordersRef);
+}
+
+async function saveOrder(order) {
+  const { getFirestore, collection, doc, setDoc }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+  const ref = doc(collection(db, 'orders'), String(order.id));
+  await setDoc(ref, order);
+}
+
+async function removeOrder(id) {
+  const { getFirestore, collection, doc, deleteDoc }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+  await deleteDoc(doc(collection(db, 'orders'), String(id)));
+}
+
+async function clearTodayOrders() {
+  const { collection, query, where, getDocs, writeBatch, doc }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+  const today = todayStr();
+  const q = query(collection(db, 'orders'), where('date','==', today));
+  const snap = await getDocs(q);
+  const batch = writeBatch(db);
+  snap.docs.forEach(d => batch.delete(d.ref));
+  await batch.commit();
+}
+
+async function saveCustomDish(dish) {
+  const { collection, doc, setDoc }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+  await setDoc(doc(collection(db, 'customDishes'), dish.id), dish);
+}
+
+async function removeCustomDish(id) {
+  const { collection, doc, deleteDoc }
+    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+  await deleteDoc(doc(collection(db, 'customDishes'), id));
+}
 
 /* ══════════════════════════════════════
    BUILD ALL DISHES MAP (for board lookups)
@@ -573,13 +640,9 @@ function addCustomDish() {
 
   const id = 'custom_' + Date.now();
   const dish = {id, zh, en, emoji, cat, sub, isCustom:true};
-  customDishes.push(dish);
-  saveCustomDishes(customDishes);
+  saveCustomDish(dish); // saves to Firebase; onSnapshot auto-updates menu
 
-  // Clear inputs
   ['newEmoji','newZh','newEn','newSub'].forEach(i => document.getElementById(i).value='');
-
-  renderMenu();
   toast(`✅ 「${zh}」已加入並儲存！Dish saved!`);
 }
 
@@ -600,10 +663,8 @@ function closeModal() {
 }
 function confirmDeleteDish() {
   if (!pendingDeleteId) return;
-  customDishes = customDishes.filter(d=>d.id!==pendingDeleteId);
-  saveCustomDishes(customDishes);
+  removeCustomDish(pendingDeleteId); // Firebase; onSnapshot auto-updates menu
   closeModal();
-  renderMenu();
   toast('菜式已刪除 · Dish removed');
 }
 document.getElementById('modalBg').addEventListener('click', e=>{
@@ -622,16 +683,17 @@ function submitOrder() {
     qty:  parseInt(card.querySelector('.qnum').textContent),
     note: card.querySelector('.note-area').value.trim()
   }));
-  orders.push({
+  const order = {
     id:   Date.now(),
+    ts:   Date.now(),
+    date: todayStr(),
     name: currentName,
     items,
     time: new Date().toLocaleTimeString('zh-HK',{hour:'2-digit',minute:'2-digit'})
-  });
-  saveOrders(orders);
-  renderBoard();
+  };
+  saveOrder(order); // saves to Firebase; onSnapshot will update board automatically
 
-  // reset
+  // reset form
   sel.forEach(c=>{
     c.classList.remove('sel');
     c.querySelector('.qnum').textContent='1';
@@ -722,14 +784,12 @@ function renderBoard() {
 }
 
 function deleteOrder(id) {
-  orders=orders.filter(o=>o.id!==id);
-  saveOrders(orders);
-  renderBoard();
+  removeOrder(id); // Firebase; onSnapshot auto-updates board
 }
 function clearAllOrders() {
   if(!orders.length) return;
   if(confirm('確定清除所有訂單？Clear all orders?')){
-    orders=[];saveOrders(orders);renderBoard();
+    clearTodayOrders();
   }
 }
 
@@ -745,32 +805,34 @@ function toast(msg) {
 /* ══════════════════════════════════════
    AUTO-RESET AT MIDNIGHT
 ══════════════════════════════════════ */
-function scheduleMidnightReset() {
+function scheduleMidnightReset(db, ordersRef) {
   const now=new Date();
   const midnight=new Date(now); midnight.setHours(24,0,0,0);
-  setTimeout(()=>{ orders=loadOrders(); renderBoard(); updateDate(); scheduleMidnightReset(); }, midnight-now);
+  setTimeout(async ()=>{
+    // purge yesterday's orders from Firestore
+    const { query, where, getDocs, writeBatch } =
+      await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+    const yesterday = (() => {
+      const y=new Date(); y.setDate(y.getDate()-1);
+      return `${y.getFullYear()}-${y.getMonth()+1}-${y.getDate()}`;
+    })();
+    const old = await getDocs(query(ordersRef, where('date','==',yesterday)));
+    const batch = writeBatch(db);
+    old.docs.forEach(d=>batch.delete(d.ref));
+    await batch.commit();
+    updateDate();
+    scheduleMidnightReset(db, ordersRef);
+  }, midnight-now);
 }
-
-/* ══════════════════════════════════════
-   CROSS-TAB SYNC (same device)
-══════════════════════════════════════ */
-window.addEventListener('storage', e=>{
-  if(e.key===todayKey()){ orders=loadOrders(); renderBoard(); }
-  if(e.key===KEY_CUSTOM_DISHES){ customDishes=loadCustomDishes(); renderMenu(); }
-});
-setInterval(()=>{
-  const fresh=loadOrders();
-  if(JSON.stringify(fresh)!==JSON.stringify(orders)){ orders=fresh; renderBoard(); }
-}, 4000);
 
 /* ══════════════════════════════════════
    INIT
 ══════════════════════════════════════ */
 updateDate();
 setInterval(updateDate, 60000);
-scheduleMidnightReset();
-renderMenu();
-renderBoard();
+renderMenu();   // render with empty customDishes first; Firebase will update
+renderBoard();  // render empty board; Firebase onSnapshot will populate
+initFirebase(); // connect to Firebase
 </script>
 </body>
 </html>
